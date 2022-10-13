@@ -1,0 +1,969 @@
+---
+title: "MGT6203 Project: US Dietary Spending"
+date: "4/23/2022"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Ojective
+
+Despite the existence of comprehensive studies on food-related consumer spending, there has been limited work in integrating available data to provide insights on the realized consumer costs of dietary choices. Our project proposes a framework for contextualizing the personal expenditure of US residents to inform dietary choices by linking economic and nutritional survey data.
+
+
+```{r include=FALSE}
+## Source Packages
+#install.packages("tidyr")
+#install.packages("dplyr")
+#install.packages("zoo")
+#install.packages("ggplot2")
+#install.packages("lubridate")
+#install.packages("ggfortify")
+#install.packages("fable")
+#install.packages("Metrics")
+#install.packages("readxl")
+#install.packages("MARSS")
+#install.packages("forecast")
+#install.packages("formatR")
+
+library(readr)
+library(dplyr)
+library(readxl)
+library(tidyr)
+library(zoo)
+library(ggplot2)
+library(forecast)
+library(ggfortify)
+library(lubridate)
+library(Metrics)
+library(gridExtra)
+library(MARSS)
+library(formatR)
+```
+
+
+## The Dataset
+
+The Quarterly Food-at-Home Price Database(https://www.ers.usda.gov/data-products/quarterly-food-at-home-price-database/) is being chosen for analysis. This database contains datasets for four broad categories of foods: Fats, Fruits and Vegetables, Grains and Dairy, and Meats and Eggs. Quarterly prices are available for 26 metropolitan and 9 nonmetropolitan markets for 2004-2010. Each dataset contains sheets for specific food groups.  
+
+For data preparation, all files were first loaded into R and each food group sheet was pulled and reformatted into a dataframe. Afterward, all 54 dataframes were combined into a list of dataframes. The next step is to select market and food groups on which to perform a time series analysis.
+
+```{r}
+## Quarterly Food at Home Price Database ##
+
+fats_sheets <- excel_sheets("qfahpd2fatsandpreparedfoods.xls")
+fats_sheets <- fats_sheets[-(1:2)] #remove ReadMe and codebook
+qfahpdFatsPrepared <- lapply(fats_sheets, function(x) 
+as.data.frame(readxl::read_excel("qfahpd2fatsandpreparedfoods.xls", sheet = x)))
+                                                    
+fruits_sheets <- excel_sheets("qfahpd2fruitsandvegetables.xls")
+fruits_sheets <- fruits_sheets[-(1:2)]
+qfahpdFruitsVeg <- lapply(fruits_sheets, function(x) 
+  as.data.frame(readxl::read_excel("qfahpd2fruitsandvegetables.xls", sheet = x)))
+
+grains_sheets <- excel_sheets("qfahpd2grainsanddairy.xls")
+grains_sheets <- grains_sheets[-(1:2)]
+qfahpdGrainsDairy <- lapply(grains_sheets, function(x) 
+  as.data.frame(readxl::read_excel("qfahpd2grainsanddairy.xls", sheet = x)))
+
+meats_sheets <- excel_sheets("qfahpd2meatsandeggs.xls")
+meats_sheets <- meats_sheets[-(1:2)]
+qfahpdMeatsEgg <- lapply(meats_sheets, function(x) 
+  as.data.frame(readxl::read_excel("qfahpd2meatsandeggs.xls", sheet = x)))
+
+# All data in large list, organized by sheet number corresponding to food category
+qfahpdAllData <- c(qfahpdFruitsVeg, qfahpdGrainsDairy, qfahpdMeatsEgg, qfahpdFatsPrepared)
+#head(qfahpdAllData)
+```
+
+## Initial data exploration
+
+We will perform some initial exploration of the data using market group 23 (San Francisco). Below are generated plots for all food groups in this subset of the data to view cycles and trends. We may benefit from converting the total expenditure values into average household expenditures instead.
+
+```{r}
+## Grabbed data for only marketgroup 23 (SF Bay Area) ##
+allData23 <- lapply(qfahpdAllData, function(x) x[x$marketgroup == 23,])
+#head(allData23)
+#length(allData23)
+
+## Converting every data frame (category) into a ts object ##
+
+allData_ts <- lapply(allData23, function(x) ts(x, frequency = 4, start = c(2004, 1)))
+#head(allData_ts[[1]])
+#head(allData_ts[[54]])
+
+#is.ts(allData_ts[[1]])
+#is.ts(allData_ts[[54]])
+
+## Making time series plots for price by each food category ##
+
+#sapply(allData_ts, plot.ts)
+```
+
+Here We explore just the eggs food group and the Metro California market group.
+
+```{r}
+#combine 10 data sheets
+MeatsNutsEggs <- data.frame()
+
+for(i in 1:length(qfahpdMeatsEgg)){
+  MeatsNutsEggs <- rbind(MeatsNutsEggs, cbind(foodGroupCode = i, qfahpdMeatsEgg[[i]]))
+}
+
+
+#subset dataset to just include market group: 14 - Metro CA, and food group: Eggs
+MeatsNutsEggs <- MeatsNutsEggs %>%
+    mutate(foodGroup = ifelse(foodGroupCode == 1, "Fresh/frozen low fat meat",
+                        ifelse(foodGroupCode == 2, "Fresh/frozen regular fat meat",
+                        ifelse(foodGroupCode == 3, "Canned meat",
+                        ifelse(foodGroupCode == 4, "Fresh/frozen poultry",
+                        ifelse(foodGroupCode == 5, "Canned poultry",
+                        ifelse(foodGroupCode == 6, "Fresh/frozen fish",
+                        ifelse(foodGroupCode == 7, "Canned fish",
+                        ifelse(foodGroupCode == 8, "Raw nuts and seeds",
+                        ifelse(foodGroupCode == 9, "Processed nuts, seeds and nut butters",
+                        ifelse(foodGroupCode == 10, "Eggs", NA))))))))))) %>%
+    mutate(YQ = as.yearqtr(paste0(year, "-", quarter))) %>%
+    filter(division == 9) %>%
+    filter(foodGroupCode == 10)
+
+data <- MeatsNutsEggs[, c(1,12, 2:4,13,5:11)]
+
+#head(data)
+
+### Quick Peek: Time Series ###
+
+#time series test with price
+tsTest <- ts(data$price, start=c(2004,1), end=c(2010,4), frequency = 4)
+plot.ts(tsTest) 
+
+#multivariate time series
+mts <- ts(cbind(data$price,data$totexp), start=c(2004,1), end=c(2010,4), frequency = 4)
+plot(mts, xlab ="Quarterly Data 2004-2010",
+    main ="Eggs",
+    col.main ="darkgreen")
+
+mts2 <- ts(data$totexp, start=c(2004,1), end=c(2010,4), frequency = 4)
+# forecasting model using arima model
+fit <- auto.arima(mts2)
+ 
+# Next 5 forecasted values
+forecast(fit, 5)
+ 
+# plotting the graph with next 5 quarterly forecasted values
+
+plot(forecast(fit, 5), xlab ="Quarterly Data 2004-2010",
+ylab ="Total Expenditure",
+main ="Eggs", col.main ="darkgreen")
+```
+
+Here are two time series plots with the subset of just eggs food group and the Metro California market group: one with price and the other with total expenditure. These additional plots help investigate if there are unique trends we can identify by narrowing down our scope.
+
+## Narrowing Our Scope
+
+With the datasets merged and cleaned, the final analysis will be performed on the selection of a representative subset of the market groups and food categories. As a California resident, California specific markets have been chosen. This includes market group 14: Metro California, 15: Los Angeles, and 23: San Francisco. Wells and Buzby (2008) found that Americans on average do not consume enough whole grains, fruits, vegetables and milk to meet 2005 Dietary Guidelines for Americans, so this provides motivation to focus on three food categories; fresh/frozen fruit, whole grain bread, rolls, rice, pasta and cereal, and full fat milk.
+
+
+```{r}
+## Load fruit and veggies dataset ##
+FruitsVeg <- data.frame()
+
+for(i in 1:length(qfahpdFruitsVeg)){
+  FruitsVeg <- rbind(FruitsVeg, cbind(foodGroupCode = i, qfahpdFruitsVeg[[i]]))
+}
+
+#Filter fruits and veg dataset to one fruit/veg group based on highest total expenditure in CA
+FruitsVeg %>%
+   filter(marketgroup == 14 | marketgroup == 15 | marketgroup == 23) %>% #CA market groups
+   group_by(foodGroupCode) %>%
+   summarise(Total = sum(totexp)) %>% 
+   arrange(Total)
+# Highest fruit and veg is food group 1: Fresh/Frozen fruit
+
+FruitsVeg <- FruitsVeg %>%
+   filter(foodGroupCode == 1) %>%
+   mutate(YQ = as.yearqtr(paste0(year, "-", quarter)),
+          NewFoodGroupCode = 1)
+
+
+#fruitsVeg subset 1 with market group 14: Metro CA
+fruitsVeg_MetroCA <- FruitsVeg %>%
+   filter(marketgroup == 14)
+
+#fruitsVeg subset 2 with market group 15: LA
+fruitsVeg_LA <- FruitsVeg %>%
+   filter(marketgroup == 15)
+
+#fruitsVeg subset 3 with market group 23:SF
+fruitsVeg_SF <- FruitsVeg %>%
+   filter(marketgroup == 23)
+
+
+
+## Load grains & dairy dataset ##
+Grains <- data.frame()
+
+for(i in 1:length(qfahpdGrainsDairy)){
+  Grains <- rbind(Grains, cbind(foodGroupCode = i, qfahpdGrainsDairy[[i]]))
+}
+
+#Filter grains & dairy dataset to food group 16: Whole grain bread, rolls, rice, pasta and cereal (foodGroupCode 1)
+Grains <- Grains %>%
+    filter(foodGroupCode == 1) %>%
+    mutate(YQ = as.yearqtr(paste0(year, "-", quarter)))
+
+#grain subset 1 with market group 14: Metro CA
+grain_MetroCA <- Grains %>%
+    filter(marketgroup == 14)
+
+#grain subset 2 with market group 15: LA
+grain_LA <- Grains %>%
+    filter(marketgroup == 15)
+
+#grain subset 3 with market group 23:SF
+grain_SF <- Grains %>%
+    filter(marketgroup == 23)
+
+
+
+
+## Load grains & dairy dataset ##
+Milk <- data.frame()
+
+for(i in 1:length(qfahpdGrainsDairy)){
+  Milk <- rbind(Milk, cbind(foodGroupCode = i, qfahpdGrainsDairy[[i]]))
+}
+
+#Filter grains & dairy dataset to one milk group based on highest total expenditure in CA (group 22: 2% or group 25: full fat milk)
+Milk %>%
+    filter(marketgroup == 14 | marketgroup == 15 | marketgroup == 23) %>% #CA market groups
+    filter(foodGroupCode == 7 | foodGroupCode == 10) %>%
+    group_by(foodGroupCode) %>%
+    summarise(Total = sum(totexp)) #foodGroupCode 10 has the highest total exp so we filter for full fat milk group
+
+Milk <- Milk %>%
+    filter(foodGroupCode == 10) %>%
+    mutate(YQ = as.yearqtr(paste0(year, "-", quarter)))
+
+#milk subset 1 with market group 14: Metro CA
+milk_MetroCA <- Milk %>%
+    filter(marketgroup == 14)
+
+#milk subset 2 with market group 15: LA
+milk_LA <- Milk %>%
+    filter(marketgroup == 15)
+
+#milk subset 3 with market group 23:SF
+milk_SF <- Milk %>%
+    filter(marketgroup == 23)
+
+```
+
+With 9 datasets of market group and food group combinations, quarterly data from 2004-2008 will be used as the training set and the data from 2009-2010 will be used as the test set.
+
+```{r}
+## THIS CODE CREATES TRAIN TEST SPLITS OF THE DATASETS ## 
+
+# Put all of the food group datasets into a list
+foodList = list(fruitsVeg_MetroCA, fruitsVeg_LA, fruitsVeg_SF, grain_MetroCA, grain_LA, grain_SF, milk_MetroCA, milk_LA, milk_SF)
+
+# This is a function that splits them into train (2004-2008) and test (2009-2010) splits
+# The output is a list with two items: the first item is a list of train datasets, 
+# the second item is a list of test datasets
+TrainTestSplit_function <- function(listOfDatasets){
+   trainDatasets = list()
+   testDatasets = list
+   for(item in listOfDatasets) {
+      # Filter the dataset
+      item_04_08 <- item %>% 
+         filter((year >= 2004) & (year <= 2008))
+      item_09_10 <- item %>% 
+         filter(year >= 2009) 
+      
+      trainDatasets <- append(trainDatasets, list(item_04_08))
+      testDatasets <- append(testDatasets, list(item_09_10))
+   }
+   return(list(trainDatasets, testDatasets))
+}
+
+# Run the function on the food list created above
+TrainTestSplits <- TrainTestSplit_function(foodList)
+
+```
+
+The accuracy of these models will be assessed by comparing predicted prices for 2009-2010 against historical prices for those years. Data on the historical prices of the selected food groups is illustrated in the below graph.
+
+```{r}
+# Reading in previous outputs
+obsAndExpPrices_ARIMA_Graph <- 
+  read_xlsx("obsAndExpPrices_ARIMA_Graph.xlsx")
+obsAndExpPrices_HW_Graph <- 
+  read_xlsx("obsAndExpPrices_HW_Graph.xlsx")
+
+
+# Visualizing the full data set 
+ggplot() +
+   geom_line(data=obsAndExpPrices_ARIMA_Graph, aes(x=factor(YQ), y=price, 
+    group=factor(marketgroup), color=factor(marketgroup))) +    
+   geom_point(data=obsAndExpPrices_ARIMA_Graph, aes(x=factor(YQ), y=price, 
+    group=factor(marketgroup), color=factor(marketgroup))) +
+   facet_wrap(~LabelsForGraph, ncol = 1) +
+   xlab("Year and Quarter") +
+   ylab("Price") +
+   #geom_vline(xintercept = "2009 Q1", color = "black") +
+   scale_x_discrete(labels=c("2004", "Q2", "Q3", "Q4", "2005", "Q2", "Q3", "Q4",
+                             "2006", "Q2", "Q3", "Q4","2007", "Q2", "Q3", "Q4",
+                             "2008", "Q2", "Q3", "Q4","2009", "Q2", "Q3", "Q4",
+                             "2010", "Q2", "Q3", "Q4")) +
+   labs(color='Market Group') +
+   scale_color_discrete(labels=c('Metro CA', 'Los Angeles', "San Francisco")) +
+   ggtitle("Quarterly Food Price by Food Group and Market Group") 
+
+```
+
+## Modeling our datasets 
+
+Below, four models of the datasets are created: a simple exponential smoothing model, a Holt-Winters exponential smoothing model (including seasonality and trend), an Autoregressive Integrated Moving Average (ARIMA) model, and a Single Variate Application of Multivariate Adaptive Autoregressive Splines (MARS) model.
+
+### Simple Exponential Smoothing (SES) Model
+
+In the historical price results graph, there was no clear trend or seasonal pattern. Thus, we explore the simple exponential smoothing (SES) method for forecasting quarterly prices of each food group for 2009 and 2010.
+
+```{r}
+###BEGIN SIMPLE EXPONENTIAL SMOOTHING: CREATING TIME SERIES OBJECTS###
+
+# Filter for market groups Metro CA, Los Angeles, San Francisco
+california <- lapply(qfahpdAllData, function(x) x[x$marketgroup %in% c(14, 15, 23),])
+california <- california[c(1, 16, 25)]
+
+# Create time series for each food group by region
+Fruit <- california[[1]]
+Fruit_metro <- ts(Fruit %>% filter(marketgroup == 14) %>% subset(select = price), frequency = 
+                    4, start = c(2004, 1))
+Fruit_metro.train <- subset(Fruit_metro, end = 20)
+Fruit_metro.test <- subset(Fruit_metro, start = 21)
+Fruit_LA <- ts(Fruit %>% filter(marketgroup == 15) %>% subset(select = price), frequency = 4, 
+               start = c(2004, 1))
+Fruit_LA.train <- subset(Fruit_LA, end = 20)
+Fruit_LA.test <- subset(Fruit_LA, start = 21)
+Fruit_SF <- ts(Fruit %>% filter(marketgroup == 23) %>% subset(select = price), frequency = 4, 
+               start = c(2004, 1))
+Fruit_SF.train <- subset(Fruit_SF, end = 20)
+Fruit_SF.test <- subset(Fruit_SF, start = 21)
+
+WholeGrain <- california[[2]]
+WholeGrain_metro <- ts(WholeGrain %>% filter(marketgroup == 14) %>% subset(select = price), 
+                       frequency = 4, start = c(2004, 1))
+WholeGrain_metro.train <- subset(WholeGrain_metro, end = 20)
+WholeGrain_metro.test <- subset(WholeGrain_metro, start = 21)
+WholeGrain_LA <- ts(WholeGrain %>% filter(marketgroup == 15) %>% subset(select = price), 
+                    frequency = 4, start = c(2004, 1))
+WholeGrain_LA.train <- subset(WholeGrain_LA, end = 20)
+WholeGrain_LA.test <- subset(WholeGrain_LA, start = 21)
+WholeGrain_SF <- ts(WholeGrain %>% filter(marketgroup == 23) %>% subset(select = price), 
+                    frequency = 4, start = c(2004, 1))
+WholeGrain_SF.train <- subset(WholeGrain_SF, end = 20)
+WholeGrain_SF.test <- subset(WholeGrain_SF, start = 21)
+
+Milk <- california[[3]]
+Milk_metro <- ts(Milk %>% filter(marketgroup == 14) %>% subset(select = price), frequency = 4, 
+                 start = c(2004, 1))
+Milk_metro.train <- subset(Milk_metro, end = 20)
+Milk_metro.test <- subset(Milk_metro, start = 21)
+Milk_LA <- ts(Milk %>% filter(marketgroup == 15) %>% subset(select = price), frequency = 4, 
+              start = c(2004, 1))
+Milk_LA.train <- subset(Milk_LA, end = 20)
+Milk_LA.test <- subset(Milk_LA, start = 21)
+Milk_SF <- ts(Milk %>% filter(marketgroup == 23) %>% subset(select = price), frequency = 4, 
+              start = c(2004, 1))
+Milk_SF.train <- subset(Milk_SF, end = 20)
+Milk_SF.test <- subset(Milk_SF, start = 21)
+```
+
+```{r}
+#Create function to draw autoplots
+drawPlot <- function(actual, ses, food, market) {
+  autoplot(ses) + 
+  autolayer(actual, series = "actual") + 
+  autolayer(ses$fitted, series =  "fitted") +
+  autolayer(ses$mean, series = "forecast") + 
+  scale_color_manual(values = c("red", "turquoise", "black")) +
+  labs(y = "Price", title = paste("Quarterly Price of", food, "in", market))
+}
+
+# Create function to calculate ranges
+findRange <- function(test) {
+  max(test)-min(test)
+}
+
+rFruit_metro <- findRange(Fruit_metro.test)
+rFruit_LA <- findRange(Fruit_LA.test)
+rFruit_SF <- findRange(Fruit_SF.test)
+rFruit_total <- findRange(c(Fruit_metro.test, Fruit_LA.test, Fruit_SF.test))
+
+rGrain_metro <- findRange(WholeGrain_metro.test)
+rGrain_LA <- findRange(WholeGrain_LA.test)
+rGrain_SF <- findRange(WholeGrain_SF.test)
+rGrain_total <- findRange(c(WholeGrain_metro.test, WholeGrain_LA.test, WholeGrain_SF.test))
+
+rMilk_metro <- findRange(Milk_metro.test)
+rMilk_LA <- findRange(Milk_LA.test)
+rMilk_SF <- findRange(Milk_SF.test)
+rMilk_total <- findRange(c(Milk_metro.test, Milk_LA.test, Milk_SF.test))
+```
+
+```{r}
+###SIMPLE EXPONENTIAL SMOOTHING: FRESH/FROZEN FRUIT###
+
+Fruit_metro.ses <- ses(Fruit_metro.train, h = 8)
+summary(Fruit_metro.ses)
+Fruit_metro.plot <- drawPlot(Fruit_metro, Fruit_metro.ses, "Fruit", "Metro CA")
+
+rmse(Fruit_metro.ses$mean, Fruit_metro.test) / rFruit_metro
+mae(Fruit_metro.ses$mean, Fruit_metro.test) / rFruit_metro
+
+Fruit_LA.ses <- ses(Fruit_LA.train, h = 8)
+summary(Fruit_LA.ses)
+Fruit_LA.plot <- drawPlot(Fruit_LA, Fruit_LA.ses, "Fruit", "Los Angeles")
+
+rmse(Fruit_LA.ses$mean, Fruit_LA.test) / rFruit_LA
+mae(Fruit_LA.ses$mean, Fruit_LA.test) / rFruit_LA
+
+Fruit_SF.ses <- ses(Fruit_SF.train, h = 8)
+summary(Fruit_SF.ses)
+Fruit_SF.plot <- drawPlot(Fruit_SF, Fruit_SF.ses, "Fruit", "San Francisco")
+
+rmse(Fruit_SF.ses$mean, Fruit_SF.test) / rFruit_SF
+mae(Fruit_SF.ses$mean, Fruit_SF.test) / rFruit_SF
+
+
+# RMSE and MAE for Fruit across all regions
+rmse(c(Fruit_metro.ses$mean, Fruit_LA.ses$mean, Fruit_SF.ses$mean), 
+     c(Fruit_metro.test, Fruit_LA.test, Fruit_SF.test)) / rFruit_total
+mae(c(Fruit_metro.ses$mean, Fruit_LA.ses$mean, Fruit_SF.ses$mean), 
+    c(Fruit_metro.test, Fruit_LA.test, Fruit_SF.test)) / rFruit_total
+```
+
+```{r}
+### SIMPLE EXPONENTIAL SMOOTHING: WHOLE GRAINS ###
+
+WholeGrain_metro.ses <- ses(WholeGrain_metro.train, h = 8)
+summary(WholeGrain_metro.ses)
+Grain_metro.plot <- drawPlot(WholeGrain_metro, WholeGrain_metro.ses, "Whole Grain", "Metro CA")
+
+rmse(WholeGrain_metro.ses$mean, WholeGrain_metro.test) / rGrain_metro
+mae(WholeGrain_metro.ses$mean, WholeGrain_metro.test) / rGrain_metro
+
+WholeGrain_LA.ses <- ses(WholeGrain_LA.train, h = 8)
+summary(WholeGrain_LA.ses)
+Grain_LA.plot <- drawPlot(WholeGrain_LA, WholeGrain_LA.ses, "Whole Grain", "Los Angeles")
+
+rmse(WholeGrain_LA.ses$mean, WholeGrain_LA.test) / rGrain_LA
+mae(WholeGrain_LA.ses$mean, WholeGrain_LA.test) / rGrain_LA
+
+WholeGrain_SF.ses <- ses(WholeGrain_SF.train, h = 8)
+summary(WholeGrain_SF.ses)
+Grain_SF.plot <- drawPlot(WholeGrain_SF, WholeGrain_SF.ses, "Whole Grain", "San Francisco")
+
+rmse(WholeGrain_SF.ses$mean, WholeGrain_SF.test) / rGrain_SF
+mae(WholeGrain_SF.ses$mean, WholeGrain_SF.test) / rGrain_SF
+
+# RMSE and MAE for Grain across all regions
+rmse(c(WholeGrain_metro.ses$mean, WholeGrain_LA.ses$mean, WholeGrain_SF.ses$mean), 
+     c(WholeGrain_metro.test, WholeGrain_LA.test, WholeGrain_SF.test)) / rGrain_total
+
+mae(c(WholeGrain_metro.ses$mean, WholeGrain_LA.ses$mean, WholeGrain_SF.ses$mean), 
+     c(WholeGrain_metro.test, WholeGrain_LA.test, WholeGrain_SF.test)) / rGrain_total
+```
+
+```{r}
+### SIMPLE EXPONENTIAL SMOOTHING: MILK ###
+
+Milk_metro.ses <- ses(Milk_metro.train, h = 8)
+summary(Milk_metro.ses)
+Milk_metro.plot <- drawPlot(Milk_metro, Milk_metro.ses, "Milk", "Metro CA")
+
+rmse(Milk_metro.ses$mean, Milk_metro.test) / rMilk_metro
+mae(Milk_metro.ses$mean, Milk_metro.test) / rMilk_metro
+
+Milk_LA.ses <- ses(Milk_LA.train, h = 8)
+summary(Milk_LA.ses)
+Milk_LA.plot <- drawPlot(Milk_LA, Milk_LA.ses, "Milk", "Los Angeles")
+
+rmse(Milk_LA.ses$mean, Milk_LA.test) / rMilk_LA
+mae(Milk_LA.ses$mean, Milk_LA.test) / rMilk_LA
+
+Milk_SF.ses <- ses(Milk_SF.train, h = 8)
+summary(Milk_SF.ses)
+Milk_SF.plot <- drawPlot(Milk_SF, Milk_SF.ses, "Milk", "San Francisco")
+
+rmse(Milk_SF.ses$mean, Milk_SF.test) / rMilk_SF
+mae(Milk_SF.ses$mean, Milk_SF.test) / rMilk_SF
+
+# RMSE and MAE for Fruit across all regions
+rmse(c(Milk_metro.ses$mean, Milk_LA.ses$mean, Milk_SF.ses$mean), 
+     c(Milk_metro.test, Milk_LA.test, Milk_SF.test)) / rMilk_total
+mae(c(Milk_metro.ses$mean, Milk_LA.ses$mean, Milk_SF.ses$mean), 
+    c(Milk_metro.test, Milk_LA.test, Milk_SF.test)) / rMilk_total
+```
+
+Overall, the forecasting prices for the milk food group showed the least reactive alpha values relative to whole grains or fresh/frozen fruit, indicating that the model did not allocate more weight to more recent prices of milk. The alpha for whole grain prices in Los Angeles stood out for being much higher than the rest in the table (𝜶 = 0.827), which suggests that more weight was placed on more recent quarterly prices to make the forecast predictions.
+
+```{r}
+### PLOT ALL SES GRAPHS INTO ONE 3x3 GRID ###
+##FIX ERROR
+#grid.arrange(Fruit_LA.plot, Fruit_metro.plot, Fruit_SF.plot, 
+             #Grain_LA.plot, Grain_metro.plot, Grain_SF.plot,
+             #Milk_LA.plot, Milk_metro.plot, Milk_SF.plot,
+             #nrow = 3, ncol = 3)
+```
+It is evident in all graphs for Los Angeles that our forecasted values do not capture the actual values well. However, the prices of whole grains seem to have been predicted well so using SES to predict quarterly prices of staple foods like whole grains can be recommended.
+
+### Autoregressive Integrated Moving Average (ARIMA) model
+
+Next, an ARIMA model was created. The normalized RMSE and MAE values are higher on the whole for the Los Angeles market group. In addition, the fresh and frozen fruit and vegetables group had higher normalized RMSE and MAE values. Overall, the ARIMA model had higher error results than the simple exponential smoothing model and thus, underperformed relative to that model.
+
+```{r}
+## CODE TO RUN ARIMA MODEL ON DATASET ##
+# This function takes a list of datasets, breaks them into train-test splits,
+# creates an ARIMA model for each, predicts values for 2009-2010, adds those predictions to the original
+# datasets, and finally combines and returns all of the datasets into one dataframe 
+# The function also prints RMSE and MAE for all of the market and food group combinations
+
+
+obsAndExpPrices_ARIMA_Graph <- 
+  read_xlsx("/Users/kaylaakawasaki/Downloads/obsAndExpPrices_ARIMA_Graph.xlsx")
+obsAndExpPrices_HW_Graph <- 
+  read_xlsx("/Users/kaylaakawasaki/Downloads/obsAndExpPrices_HW_Graph.xlsx")
+
+ARIMA_function <- function(listOfDatasets){
+   i = 1
+   FullCombinedDataframe = data.frame(matrix(nrow = 0, ncol = 15))
+   colnames(FullCombinedDataframe) = names(listOfDatasets[[1]])
+   for(item in listOfDatasets) {
+      # Add factor to the dataset for NewFoodGroupCode
+      item <- item %>% 
+         mutate(NewFoodGroupCode = factor(NewFoodGroupCode, levels = 1:3, 
+                                          labels = c("Fresh and frozen fruit", "Whole grain 
+                                                     bread, rolls, rice, pasta and cereal", 
+                                                     "Whole and 2% milk")))
+      # Filter the dataset
+      item_04_08 <- item %>% 
+         filter((year >= 2004) & (year <= 2008))
+      # Make the dataset into a time series object
+      item_04_08_ts <- ts(item_04_08[,"price"],start=c(2004,1), frequency = 4)
+      # Run an exponential smoothing model on it
+      arima_item <- auto.arima(item_04_08_ts)
+      # Predict values of the es model for 2009-2010
+      predict_item <- predict(arima_item, n.ahead = 8, prediction.interval = TRUE,
+                              level = 0.95)
+      # Reformatting the predictions and adding them into the original dataset
+      predict_item = data.frame(predict_item)
+      predict_item_df = data.frame("pred" = rep(NA,28), "se_pred"=rep(NA,28))
+      predict_item_df[21:28,] <- predict_item
+      output <- cbind(item, predict_item_df)
+      listOfDatasets[[i]] <- cbind(item, predict_item_df)
+      # Calculate and print RMSE
+      outputFiltered <- output %>% 
+         filter(!is.na(pred))
+      nrmse = (Metrics::rmse(outputFiltered$pred, 
+                             outputFiltered$price)/((max(outputFiltered$price, na.rm=TRUE) - 
+                                                       min(outputFiltered$price, na.rm=TRUE))))
+      nmae = (Metrics::mae(outputFiltered$pred, 
+                           outputFiltered$price)/(max(outputFiltered$price, na.rm=TRUE) - 
+                                                    min(outputFiltered$price, na.rm=TRUE)))
+      print(paste("nrmse for", names(listOfDatasets[i]), ":", nrmse))
+      print(paste("nmae for", names(listOfDatasets[i]), ":", nmae))
+      FullCombinedDataframe = rbind(FullCombinedDataframe, listOfDatasets[[i]])
+      i=i+1
+   }
+   return(FullCombinedDataframe)
+}
+obsAndExpPrices_ARIMA <- ARIMA_function(foodList)
+```
+
+Similar to the previous graphs, the group of plots below shows prices for the selected food and market groups during the years 2009-2010. The red lines display the predicted prices from our ARIMA model while the teal lines show the actual historical prices at those time points. From these graphs we see that there aren’t clear seasonal patterns or trends. In addition, we see that the model accurately predicted all of the food groups’ prices with the exception of fresh and frozen fruit/vegetables in LA.
+
+
+```{r}
+# ARIMA GRAPHS- Making the dataset long by combining predicted and price vars 
+obsAndExpPrices_ARIMA_Graph_long <- obsAndExpPrices_ARIMA_Graph %>% 
+   pivot_longer(cols = c("pred", "price"),
+                names_to = "TypeVar",
+                values_to = "Value") %>% 
+   filter(year %in% c(2009, 2010)) %>% 
+   mutate(NewFoodGroupCode_labels = case_when(NewFoodGroupCode == "Fresh and frozen fruit" ~ 
+                                                "Fresh and frozen fruit", 
+                                     NewFoodGroupCode == "Whole grain bread, rolls, rice, pasta
+                                     and cereal" ~ "Whole grain bread, rolls, rice, pasta and 
+                                     cereal", 
+                                     NewFoodGroupCode == "Whole and 2% milk" ~ "Whole and 2% 
+                                     milk"),
+          marketgroup_labels = case_when(marketgroup == 14 ~ "Metro CA", 
+                                              marketgroup == 15 ~ "Los Angeles", 
+                                              marketgroup == 23 ~ "San Francisco"))
+
+# Plotting ARIMA Results
+ggplot(data=obsAndExpPrices_ARIMA_Graph_long, aes(x=factor(YQ), y=Value, 
+   group=factor(TypeVar), color=factor(TypeVar))) +
+   geom_line() +    
+   geom_point() +
+   facet_wrap(~NewFoodGroupCode_labels+marketgroup_labels, ncol = 3) +
+   xlab("Year and Quarter") +
+   ylab("Price") +
+   scale_x_discrete(labels=c("2009", "Q2", "Q3", "Q4",
+                             "2010", "Q2", "Q3", "Q4")) +
+   labs(color='Type of Price') +
+   scale_color_discrete(labels=c('Predicted', 'Historical')) +
+   ggtitle("Quarterly Food Price by Food Group and Market Group - ARIMA Predictions and Historical Price") 
+```
+
+Since the ARIMA results were outperformed by the SES model, using ARIMA to predict quarterly prices of staple foods in California is not reliable nor recommended.
+
+```{r}
+## CALCULATING ACCURACY OF ARIMA MODELS ##
+# Reading accuracy files from Excel 
+obsAndExpPrices_ARIMA_Accuracy <- 
+   read_xlsx("/Users/kaylaakawasaki/Downloads/obsAndExpPrices_ARIMA_Accuracy.xlsx")
+
+# Full ARIMA model NRMSE and NMAE
+obsAndExpPrices_ARIMA_Accuracy %>% 
+   dplyr::group_by(NewFoodGroupCode) %>% 
+   dplyr::summarize(nrmse = rmse(pred, price)/(max(price, na.rm=TRUE) - min(price, na.rm=TRUE)),
+                    nmae = mae(pred, price)/(max(price, na.rm=TRUE) - min(price, na.rm=TRUE)))
+
+```
+
+
+
+### Holt-Winters exponential smoothing model
+
+There was suspected seasonality or trends of prices of certain food but the data did not support this conclusion when visualized in a graph. In general, Holt-Winters models outperform SES models when there is seasonality but the Holt-Winters model underperformed compared to the SES model, again supporting the conclusion that there weren’t seasonal patterns or trends in the data.
+
+```{r}
+## HOLT WINTERS SMOOTHING MODEL ##
+# This function takes a list of datasets, breaks them into train-test splits,
+# creates a Holt Winters model for each, predicts values for 2009-2010, adds those predictions to the original datasets, and finally combines and returns all of the datasets into one 
+#dataframe 
+# The function also prints RMSE and MAE for all of the market and food group combinations
+HW_function <- function(listOfDatasets){
+   i = 1
+   FullCombinedDataframe = data.frame(matrix(nrow = 0, ncol = 15))
+   colnames(FullCombinedDataframe) = names(listOfDatasets[[1]])
+   for(item in listOfDatasets) {
+      # Add factor to the dataset for NewFoodGroupCode
+      item <- item %>% 
+         mutate(NewFoodGroupCode = factor(NewFoodGroupCode, levels = 1:3, 
+                              labels = c("Fresh and frozen fruit", "Whole grain bread, 
+                              rolls, rice, pasta and cereal", "Whole and 2% milk")))
+      # Filter the dataset
+      item_04_08 <- item %>% 
+         filter((year >= 2004) & (year <= 2008))
+      # Make the dataset into a time series object
+      item_04_08_ts <- ts(item_04_08[,"price"],start=c(2004,1), frequency = 4)
+      # Run an exponential smoothing model on it
+      HW_item <- HoltWinters(item_04_08_ts, gamma = TRUE, seasonal = "additive")
+      # Predict values of the es model for 2009-2010
+      predict_item <- predict(HW_item, n.ahead = 8, prediction.interval = TRUE,
+                              level = 0.95)
+      # Reformatting the predictions and adding them into the original dataset
+      predict_item = data.frame(predict_item)
+      predict_item_df = data.frame("fit" = rep(NA,28), "lwr"=rep(NA,28), "upr"=rep(NA,28))
+      predict_item_df[21:28,] <- predict_item
+      output <- cbind(item, predict_item_df)
+      listOfDatasets[[i]] <- cbind(item, predict_item_df)
+      # Calculate and print RMSE
+      outputFiltered <- output %>% 
+         filter(!is.na(fit))
+      nrmse = (Metrics::rmse(outputFiltered$fit, 
+                             outputFiltered$price)/((max(outputFiltered$price, na.rm=TRUE) - 
+                                                min(outputFiltered$price, na.rm=TRUE))))
+      nmae = (Metrics::mae(outputFiltered$fit, 
+                           outputFiltered$price)/(max(outputFiltered$price, na.rm=TRUE) - 
+                                                     min(outputFiltered$price, na.rm=TRUE)))
+      print(paste("nrmse for", names(listOfDatasets[i]), ":", nrmse))
+      print(paste("nmae for", names(listOfDatasets[i]), ":", nmae))
+      FullCombinedDataframe = rbind(FullCombinedDataframe, listOfDatasets[[i]])
+      i=i+1
+   }
+   return(FullCombinedDataframe)
+}
+obsAndExpPrices_HW <- HW_function(foodList)
+```
+
+Unlike with the ARIMA results, while some trends are evidenced within a food and market group (for example Fresh and frozen fruits and vegetables in LA), the HW model doesn't display any clear patterns across market or food groups. On the whole this model had higher error results than the simple exponential smoothing and ARIMA models and thus underperformed relative to those models.
+
+
+```{r}
+# HW - Making the dataset long by combining predicted and price vars 
+obsAndExpPrices_HW_Graph_long <- obsAndExpPrices_HW_Graph %>% 
+   pivot_longer(cols = c("fit", "price"),
+                names_to = "TypeVar",
+                values_to = "Value") %>% 
+   filter(year %in% c(2009, 2010)) %>% 
+   mutate(NewFoodGroupCode_labels = case_when(NewFoodGroupCode == "Fresh and frozen fruit" ~ "Fresh and frozen fruit", 
+                                              NewFoodGroupCode == "Whole grain bread, rolls, rice, pasta and cereal" ~ "Whole grain bread, rolls, rice, pasta and cereal", 
+                                              NewFoodGroupCode == "Whole and 2% milk" ~ "Whole and 2% milk"),
+          marketgroup_labels = case_when(marketgroup == 14 ~ "Metro CA", 
+                                         marketgroup == 15 ~ "Los Angeles", 
+                                         marketgroup == 23 ~ "San Francisco"))
+
+# Plotting HW Results
+ggplot(data=obsAndExpPrices_HW_Graph_long, aes(x=factor(YQ), y=Value, group=factor(TypeVar), color=factor(TypeVar))) +
+   geom_line() +    
+   geom_point() +
+   facet_wrap(~NewFoodGroupCode_labels+marketgroup_labels, ncol = 3) +
+   xlab("Year and Quarter") +
+   ylab("Price") +
+   scale_x_discrete(labels=c("2009", "Q2", "Q3", "Q4",
+                             "2010", "Q2", "Q3", "Q4")) +
+   labs(color='Type of Price') +
+   scale_color_discrete(labels=c('Predicted', 'Historical')) +
+   ggtitle("Quarterly Food Price by Food Group and Market Group - Holt Winters Predictions and Historical Price") 
+```
+
+The set of graphs above shows the prices of the selected food and market groups on the y-axis and the year and quarter for the years 2009-2010 on the y-axis. The red lines display the predicted prices from the Holt-Winters exponential smoothing model while the teal lines show the actual historical prices at those time points. From this graphic, we see that the model predicted all of the food groups’ prices relatively well, with the exception of fresh and frozen fruit/vegetables in LA.
+
+```{r}
+## CALCULATING ACCURACY OF HW MODEL ##
+# Reading accuracy files from Excel 
+obsAndExpPrices_HW_Accuracy <- 
+   read_xlsx("obsAndExpPrices_HW_Accuracy.xlsx")
+
+# Full Holt Winters model NRMSE and NMAE
+obsAndExpPrices_HW_Accuracy %>% 
+   dplyr::group_by(NewFoodGroupCode) %>% 
+   dplyr::summarize(nrmse = rmse(fit, price)/(max(price, na.rm=TRUE) - min(price, na.rm=TRUE)),
+                    nmae = mae(fit, price)/(max(price, na.rm=TRUE) - min(price, na.rm=TRUE)))
+
+```
+
+
+### Single Variate Application of Multivariate Adaptive Autoregressive Splines (MARS) model
+
+Multivariate Adaptive Regression Splines are a flexible method that allow for fitting linear regression models on multiple predictors in the form of a weighted sum of basis functions. Below we implement a univariate MARS model using only the pricing information as an autoregressive predictor. 
+
+```{r}
+## CODE TO RUN MARS MODEL ON DATASET ##
+
+### Single Variate Adaptive Auto-regressive Splines (MARS on Univariate Data)
+
+# define helper functions
+predMARS <- function(marssFoodObj, testVals){
+  return(
+    MARSS:::predict.marssMLE(
+      marssFoodObj, type = "ytT", n.ahead = 8, newdata = list(y = testVals)
+    )
+  )
+}
+
+plotMARS <- function(marssMLEobject, testVals, labelMarket, labelFood){
+  MARSS:::plot.marssPredict(
+    marssMLEobject, main = paste(c(labelMarket, labelFood),sep = " - "),
+    showgap = FALSE, decorate = TRUE,
+    xlab = "Year and Quarter", ylab = "Price (USD)"
+    ) 
+    points(testVals)
+    grid()
+}
+```
+
+```{r}
+## CODE TO RUN MARS MODEL ON DATASET ##
+
+### MARS on Univariate Data for Whole Grains
+
+# Whole Grains
+labelFood <- "Whole grain bread, rolls, rice, pasta, and cereal"
+# Metropolitan CA
+region <- "Metro CA"
+WholeGrain_metro.mars <- MARSS(WholeGrain_metro.train, silent = TRUE)
+WholeGrain_metro.mars_pred <- predMARS(WholeGrain_metro.mars, WholeGrain_metro.test)
+plotMARS(WholeGrain_metro.mars_pred, WholeGrain_metro.test, labelFood, region)
+mars.WholeGrain.mca.nmae <- mae(c(WholeGrain_metro.mars_pred$pred$estimate[21:28]), c(WholeGrain_metro.test)) / c(rGrain_metro)
+mars.WholeGrain.mca.nrmse<- rmse(c(WholeGrain_metro.mars_pred$pred$estimate[21:28]), c(WholeGrain_metro.test)) / c(rGrain_metro)
+paste("Metro CA       |", 
+      "NRMSE:", round(mars.WholeGrain.mca.nrmse,3),
+      "NMAE:", round(mars.WholeGrain.mca.nmae,3)
+      )
+
+# Los Angeles
+region <- "Los Angeles"
+WholeGrain_LA.mars <- MARSS(WholeGrain_LA.train, silent = TRUE)
+WholeGrain_LA.mars_pred <- predMARS(WholeGrain_LA.mars, WholeGrain_LA.test)
+plotMARS(WholeGrain_LA.mars_pred, WholeGrain_LA.test, labelFood, region)
+mars.WholeGrain.la.nmae <- mae(c(WholeGrain_LA.mars_pred$pred$estimate[21:28]),c(WholeGrain_LA.test)) / c(rGrain_LA)
+mars.WholeGrain.la.nrmse <- rmse(c(WholeGrain_LA.mars_pred$pred$estimate[21:28]),c(WholeGrain_LA.test)) / c(rGrain_LA)
+paste("Los Angeles    |",
+      "NRMSE:", round(mars.WholeGrain.la.nrmse,3),
+      "NMAE:", round(mars.WholeGrain.la.nmae,3)
+      )
+
+# San Francisco
+region <- "San Francisco"
+WholeGrain_SF.mars <- MARSS(WholeGrain_SF.train, silent = TRUE)
+WholeGrain_SF.mars_pred <- predMARS(WholeGrain_SF.mars, WholeGrain_SF.test)
+plotMARS(WholeGrain_SF.mars_pred, WholeGrain_SF.test, labelFood, region)
+
+mars.WholeGrain.sf.nmae <- mae(c(WholeGrain_SF.mars_pred$pred$estimate[21:28]),c(WholeGrain_SF.test)) / c(rGrain_SF)
+mars.WholeGrain.sf.nrmse <- rmse(c(WholeGrain_SF.mars_pred$pred$estimate[21:28]),c(WholeGrain_SF.test)) / c(rGrain_SF)
+paste("San Francisco  |", 
+      "NRMSE:", round(mars.WholeGrain.sf.nrmse,3),
+      "NMAE:", round(mars.WholeGrain.sf.nmae,3)
+      )
+
+# Evaluate MAE and RMSE for across all subset regions, normalized by total
+mars.WholeGrain.all.nmae <- mae(
+  c(WholeGrain_metro.mars_pred$pred$estimate[21:28],
+    WholeGrain_LA.mars_pred$pred$estimate[21:28],
+    WholeGrain_SF.mars_pred$pred$estimate[21:28]
+    ),
+  c(WholeGrain_metro.test, WholeGrain_LA.test, WholeGrain_SF.test)
+) / rGrain_total
+mars.WholeGrain.all.nrmse <- rmse(
+  c(WholeGrain_metro.mars_pred$pred$estimate[21:28],
+    WholeGrain_LA.mars_pred$pred$estimate[21:28],
+    WholeGrain_SF.mars_pred$pred$estimate[21:28]
+    ),
+  c(WholeGrain_metro.test, WholeGrain_LA.test, WholeGrain_SF.test)
+) / rGrain_total
+
+paste("Total CA       |", 
+      "NRMSE:", round(mars.WholeGrain.all.nrmse,3), 
+      "NMAE:", round(mars.WholeGrain.all.nmae,3)
+      )
+```
+
+
+```{r}
+## CODE TO RUN MARS MODEL ON DATASET ##
+
+### MARS on Univariate Data for Fruit
+
+## Fruit
+labelFood <- "Fresh and frozen fruit"
+# Metropolitan CA
+region <- "Metro CA"
+Fruit_metro.mars <- MARSS(Fruit_metro.train, silent = TRUE)
+Fruit_metro.mars_pred <- predMARS(Fruit_metro.mars, Fruit_metro.test)
+plotMARS(Fruit_metro.mars_pred, Fruit_metro.test, labelFood, region)
+mars.fruit.mca.nmae <- mae(c(Fruit_metro.mars_pred$pred$estimate[21:28]), c(Fruit_metro.test)) / c(rFruit_metro)
+mars.fruit.mca.nrmse<- rmse(c(Fruit_metro.mars_pred$pred$estimate[21:28]), c(Fruit_metro.test)) / c(rFruit_metro)
+paste("Metro CA |", "NRMSE:", mars.fruit.mca.nrmse, "NMAE:", mars.fruit.mca.nmae)
+
+# Los Angeles
+region <- "Los Angeles"
+Fruit_LA.mars <- MARSS(Fruit_LA.train, silent = TRUE)
+Fruit_LA.mars_pred <- predMARS(Fruit_LA.mars, Fruit_LA.test)
+plotMARS(Fruit_LA.mars_pred, Fruit_LA.test, labelFood, region)
+mars.fruit.la.nmae <- mae(c(Fruit_LA.mars_pred$pred$estimate[21:28]), c(Fruit_LA.test)) / c(rFruit_LA)
+mars.fruit.la.nrmse <- rmse(c(Fruit_LA.mars_pred$pred$estimate[21:28]), c(Fruit_LA.test)) / c(rFruit_LA)
+paste("Los Angeles |", "NRMSE:", mars.fruit.la.nrmse, "NMAE:", mars.fruit.la.nmae)
+
+# San Francisco
+region <- "San Francisco"
+Fruit_SF.mars <- MARSS(Fruit_SF.train, silent = TRUE)
+Fruit_SF.mars_pred <- predMARS(Fruit_SF.mars, Fruit_SF.test)
+plotMARS(Fruit_SF.mars_pred, Fruit_SF.test, labelFood, region)
+
+mars.fruit.sf.nmae <- mae(c(Fruit_SF.mars_pred$pred$estimate[21:28]), c(Fruit_SF.test)) / c(rFruit_SF)
+mars.fruit.sf.nrmse <- rmse(c(Fruit_SF.mars_pred$pred$estimate[21:28]), c(Fruit_SF.test)) / c(rFruit_SF)
+paste("San Francisco |", "NRMSE:", mars.fruit.sf.nrmse, "NMAE:", mars.fruit.sf.nmae)
+
+# Evaluate MAE and RMSE for across all subset regions, normalized by total
+mae(
+  c(Fruit_metro.mars_pred$pred$estimate[21:28],
+    Fruit_LA.mars_pred$pred$estimate[21:28],
+    Fruit_SF.mars_pred$pred$estimate[21:28]
+    ),
+  c(Fruit_metro.test, Fruit_LA.test, Fruit_SF.test)
+) / rFruit_total
+rmse(
+  c(Fruit_metro.mars_pred$pred$estimate[21:28],
+    Fruit_LA.mars_pred$pred$estimate[21:28],
+    Fruit_SF.mars_pred$pred$estimate[21:28]
+    ),
+  c(Fruit_metro.test, Fruit_LA.test, Fruit_SF.test)
+) / rFruit_total
+```
+
+
+```{r}
+## CODE TO RUN MARS MODEL ON DATASET ##
+
+### MARS on Univariate Data for Milk
+
+# Milk
+labelFood <- "Whole and 2% Milk"
+# Metropolitan CA
+region <- "Metro CA"
+Milk_metro.mars <- MARSS(Milk_metro.train, silent = TRUE)
+Milk_metro.mars_pred <- predMARS(Milk_metro.mars, Milk_metro.test)
+plotMARS(Milk_metro.mars_pred, Milk_metro.test, labelFood, region)
+mars.Milk.mca.nmae <- mae(c(Milk_metro.mars_pred$pred$estimate[21:28]), c(Milk_metro.test)) / c(rMilk_metro)
+mars.Milk.mca.nrmse<- rmse(c(Milk_metro.mars_pred$pred$estimate[21:28]), c(Milk_metro.test)) / c(rMilk_metro)
+paste("Metro CA       |", 
+      "NRMSE:", round(mars.Milk.mca.nrmse,3),
+      "NMAE:", round(mars.Milk.mca.nmae,3)
+      )
+
+# Los Angeles
+region <- "Los Angeles"
+Milk_LA.mars <- MARSS(Milk_LA.train, silent = TRUE)
+Milk_LA.mars_pred <- predMARS(Milk_LA.mars, Milk_LA.test)
+plotMARS(Milk_LA.mars_pred, Milk_LA.test, labelFood, region)
+mars.Milk.la.nmae <- mae(c(Milk_LA.mars_pred$pred$estimate[21:28]), c(Milk_LA.test)) / c(rMilk_LA)
+mars.Milk.la.nrmse <- rmse(c(Milk_LA.mars_pred$pred$estimate[21:28]),c(Milk_LA.test)) / c(rMilk_LA)
+paste("Los Angeles    |",
+      "NRMSE:", round(mars.Milk.la.nrmse,3),
+      "NMAE:", round(mars.Milk.la.nmae,3)
+      )
+
+# San Francisco
+region <- "San Francisco"
+Milk_SF.mars <- MARSS(Milk_SF.train, silent = TRUE)
+Milk_SF.mars_pred <- predMARS(Milk_SF.mars, Milk_SF.test)
+plotMARS(Milk_SF.mars_pred, Milk_SF.test, labelFood, region)
+
+mars.Milk.sf.nmae <- mae(c(Milk_SF.mars_pred$pred$estimate[21:28]), c(Milk_SF.test)) / c(rMilk_SF)
+mars.Milk.sf.nrmse <- rmse(c(Milk_SF.mars_pred$pred$estimate[21:28]), c(Milk_SF.test)) / c(rMilk_SF)
+paste("San Francisco  |", 
+      "NRMSE:", round(mars.Milk.sf.nrmse,3),
+      "NMAE:", round(mars.Milk.sf.nmae,3)
+      )
+
+# Evaluate MAE and RMSE for across all subset regions, normalized by total
+mars.Milk.all.nmae <- mae(
+  c(Milk_metro.mars_pred$pred$estimate[21:28],
+    Milk_LA.mars_pred$pred$estimate[21:28],
+    Milk_SF.mars_pred$pred$estimate[21:28]
+    ),
+  c(Milk_metro.test, Milk_LA.test, Milk_SF.test)
+) / rMilk_total
+mars.Milk.all.nrmse <- rmse(
+  c(Milk_metro.mars_pred$pred$estimate[21:28],
+    Milk_LA.mars_pred$pred$estimate[21:28],
+    Milk_SF.mars_pred$pred$estimate[21:28]
+    ),
+  c(Milk_metro.test, Milk_LA.test, Milk_SF.test)
+) / rMilk_total
+
+paste("Total CA       |", 
+      "NRMSE:", round(mars.Milk.all.nrmse,3), 
+      "NMAE:", round(mars.Milk.all.nmae,3)
+      )
+```
+
+In the results obtained from our single variate application of MARS, no normalized error terms stand out that would suggest an inability for this technique to generalize to different market and food groups, and the model performance as aggregated at the food group level is comparable to the alternative methods examined in this project.
+
+
+## Conclusion
+
+The model with the lowest average normalized RMSE and MAE across California market groups for 2009-2010 was MARS. With our results, we can say that we are able to resolve predictions within as little as 34% error of the overall range of input price data presented to the model in the case of the normalized root mean squared error. For the three food categories examined, the group with the lowest MARS average prediction error was Whole Milk.
+
+
