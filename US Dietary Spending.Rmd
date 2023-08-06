@@ -1,5 +1,5 @@
 ---
-title: "MGT6203 Project: US Dietary Spending"
+title: "US Dietary Spending"
 date: "4/23/2022"
 output:
   pdf_document: default
